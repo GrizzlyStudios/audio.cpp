@@ -28,6 +28,9 @@ struct ChatterboxEnglishTokenizerModel {
     int32_t unk_id = -1;
     int32_t start_id = -1;
     int32_t stop_id = -1;
+    // Han character -> Cangjie code, e.g. U+5B66 -> "xfbnd". Empty unless the
+    // multilingual tokenizer was loaded with its Cangjie5_TC.json.
+    std::unordered_map<uint32_t, std::string> cangjie_codes;
 };
 
 namespace {
@@ -277,8 +280,69 @@ std::vector<int32_t> encode_marked_text(
 
 }  // namespace
 
+namespace {
+
+// Mirrors upstream Chatterbox's ChineseCangjieConverter: each entry is
+// "<char>\t<code>"; a character's code is the last one listed for it, and
+// when several characters share a code the later ones get the index of their
+// position in that code's list appended ("a", "a1", "a2"...).
+std::unordered_map<uint32_t, std::string> load_cangjie_codes(const std::filesystem::path & path) {
+    const auto root = engine::io::json::parse_file(path);
+    std::unordered_map<uint32_t, std::string> code_of;
+    std::unordered_map<std::string, std::vector<uint32_t>> words_of;
+    for (const auto & item : root.as_array()) {
+        const std::string & entry = item.as_string();
+        const auto tab = entry.find('\t');
+        if (tab == std::string::npos) {
+            continue;
+        }
+        const auto cpts = unicode_cpts_from_utf8(entry.substr(0, tab));
+        if (cpts.size() != 1) {
+            continue;
+        }
+        const auto code_end = entry.find('\t', tab + 1);
+        const std::string code = entry.substr(tab + 1, code_end == std::string::npos ? code_end : code_end - tab - 1);
+        code_of[cpts[0]] = code;
+        words_of[code].push_back(cpts[0]);
+    }
+    std::unordered_map<uint32_t, std::string> out;
+    out.reserve(code_of.size());
+    for (const auto & [cpt, code] : code_of) {
+        const auto & words = words_of.at(code);
+        const auto first = std::find(words.begin(), words.end(), cpt) - words.begin();
+        out.emplace(cpt, first > 0 ? code + std::to_string(first) : code);
+    }
+    return out;
+}
+
+// Upstream converts only characters of Unicode category Lo that the mapping
+// knows; the spacing modifier letters it lists (tone marks) are Lm.
+std::string cangjie_encode_text(const ChatterboxEnglishTokenizerModel & tokenizer, const std::string & text) {
+    std::string out;
+    out.reserve(text.size() * 6);
+    for (const uint32_t cpt : unicode_cpts_from_utf8(text)) {
+        if (unicode_cpt_flags_from_cpt(cpt).is_letter && !(cpt >= 0x2B0U && cpt <= 0x2FFU)) {
+            const auto it = tokenizer.cangjie_codes.find(cpt);
+            if (it != tokenizer.cangjie_codes.end()) {
+                for (const char c : it->second) {
+                    out += "[cj_";
+                    out.push_back(c);
+                    out += "]";
+                }
+                out += "[cj_.]";
+                continue;
+            }
+        }
+        out += unicode_cpt_to_utf8(cpt);
+    }
+    return out;
+}
+
+}  // namespace
+
 std::shared_ptr<const ChatterboxEnglishTokenizerModel> load_chatterbox_english_tokenizer(
-    const std::filesystem::path & tokenizer_path) {
+    const std::filesystem::path & tokenizer_path,
+    const std::filesystem::path & cangjie_path) {
     const auto root = engine::io::json::parse_file(tokenizer_path);
     const auto & model = root.require("model");
     if (model.require("type").as_string() != "BPE") {
@@ -330,6 +394,9 @@ std::shared_ptr<const ChatterboxEnglishTokenizerModel> load_chatterbox_english_t
     tokenizer->special_tokens.erase(
         std::unique(tokenizer->special_tokens.begin(), tokenizer->special_tokens.end()),
         tokenizer->special_tokens.end());
+    if (!cangjie_path.empty()) {
+        tokenizer->cangjie_codes = load_cangjie_codes(cangjie_path);
+    }
     return tokenizer;
 }
 
@@ -399,7 +466,7 @@ std::string normalize_chatterbox_tts_text(const std::string & text) {
 std::vector<std::string> supported_chatterbox_language_codes() {
     return {
         "ar", "da", "de", "el", "en", "es", "fi", "fr", "hi", "it",
-        "ko", "ms", "nl", "no", "pl", "pt", "sv", "sw", "tr",
+        "ko", "ms", "nl", "no", "pl", "pt", "sv", "sw", "tr", "zh",
     };
 }
 
@@ -435,6 +502,11 @@ std::vector<int32_t> encode_chatterbox_multilingual_text(
     std::string prepared = lower_and_normalize_nfkd(text);
     if (normalized_language == "ko") {
         prepared = decompose_korean_hangul(prepared);
+    } else if (normalized_language == "zh") {
+        if (tokenizer.cangjie_codes.empty()) {
+            throw std::runtime_error("Chatterbox Chinese needs the Cangjie mapping, which this model does not provide");
+        }
+        prepared = cangjie_encode_text(tokenizer, prepared);
     }
     return encode_marked_text(tokenizer, "[" + normalized_language + "]" + replace_spaces_with_marker(prepared));
 }

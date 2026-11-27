@@ -11,7 +11,8 @@ namespace engine::models::chatterbox {
 struct ChatterboxEnglishTokenizerModel;
 
 std::shared_ptr<const ChatterboxEnglishTokenizerModel> load_chatterbox_english_tokenizer(
-    const std::filesystem::path & tokenizer_path);
+    const std::filesystem::path & tokenizer_path,
+    const std::filesystem::path & cangjie_path = {});
 
 std::string normalize_chatterbox_tts_text(const std::string & text);
 std::vector<std::string> supported_chatterbox_language_codes();

@@ -1,0 +1,12 @@
+# audio.cpp vs upstream Chatterbox (Python) multilingual token ids, one case a line: "<lang><TAB><text>".
+# The six cases the original local-tts patch was checked on, then the task's test text, then en/es,
+# which the patch must not touch. compare.py also appends every single character Cangjie5_TC.json lists.
+zh	你好，世界。今天的会议讨论了学校预算。
+zh	“教育委员会”：（第一项）——预算！？；、
+zh	mā má mǎ mà ˉˊˇˋ˙ 拼音 pīnyīn
+zh	日本語のかなとカタカナ：ひらがな、カタカナ。
+zh	CivicRecap 在 2026 年报道 San José 的 City Council 会议。
+zh	我们先从学校说起
+zh	以下是莫根希尔联合学区教育委员会于二零二六年十一月十九日，星期四，会议上的情况。我们先从安·索布拉托高中说起。
+en	Here is what the Morgan Hill Unified school board decided on Thursday, November 19.
+es	Esto es lo que decidió la junta escolar de Morgan Hill el jueves 19 de noviembre, señor Muñoz.
