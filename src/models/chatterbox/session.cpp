@@ -158,8 +158,7 @@ std::unique_ptr<ChatterboxTTSComponent> make_chatterbox_component_for_language(
     engine::assets::TensorStorageType component_weight_storage_type,
     ChatterboxMultilingualT3Version multilingual_t3_version,
     bool mem_saver,
-    const std::string & language) {
-    const bool use_multilingual = chatterbox_language_uses_multilingual_t3(language);
+    bool use_multilingual) {
     const auto & t3_source = use_multilingual
         ? (multilingual_t3_version == ChatterboxMultilingualT3Version::V3
                ? *assets.t3_multilingual_v3_weights
@@ -170,10 +169,11 @@ std::unique_ptr<ChatterboxTTSComponent> make_chatterbox_component_for_language(
         execution_context,
         t3_weight_storage_type,
         false);
-    auto tokenizer = load_chatterbox_english_tokenizer(
-        use_multilingual
-            ? assets.resources.require_file("multilingual_tokenizer")
-            : assets.resources.require_file("english_tokenizer"));
+    auto tokenizer = use_multilingual
+        ? load_chatterbox_english_tokenizer(
+              assets.resources.require_file("multilingual_tokenizer"),
+              assets.resources.require_file("cangjie_mapping"))
+        : load_chatterbox_english_tokenizer(assets.resources.require_file("english_tokenizer"));
     auto voice_encoder = VoiceEncoderComponent::load_from_source(*assets.voice_encoder_weights, options.backend);
     auto s3_tokenizer = S3TokenizerComponent::load_from_source(
         *assets.s3gen_weights,
@@ -197,6 +197,7 @@ std::unique_ptr<ChatterboxTTSComponent> make_chatterbox_component_for_language(
         std::move(s3gen),
         make_prompt_prep_config(options),
         execution_context,
+        use_multilingual,
         mem_saver);
 }
 
@@ -262,6 +263,7 @@ void validate_chatterbox_options(const runtime::SessionOptions & options) {
             key != "chatterbox.weight_type" &&
             key != "chatterbox.t3_weight_type" &&
             key != "chatterbox.multilingual_t3" &&
+            key != "chatterbox.english_t3" &&
             key != "chatterbox.conditionals_cache_slots" &&
             key != "chatterbox.vc_reference_cache_slots" &&
             key != "chatterbox.mem_saver" &&
@@ -302,6 +304,21 @@ ChatterboxMultilingualT3Version resolve_multilingual_t3_version(const runtime::S
         return ChatterboxMultilingualT3Version::V3;
     }
     throw std::runtime_error("chatterbox.multilingual_t3 must be v2 or v3");
+}
+
+// Which T3 reads English: its own (the default, upstream's behaviour) or the
+// multilingual one chatterbox.multilingual_t3 picks, so every language reads
+// through the same model.
+bool resolve_english_via_multilingual(const runtime::SessionOptions & options) {
+    const auto value = runtime::find_option(options.options, {"chatterbox.english_t3", "english_t3"})
+                           .value_or("english");
+    if (value == "english") {
+        return false;
+    }
+    if (value == "multilingual") {
+        return true;
+    }
+    throw std::runtime_error("chatterbox.english_t3 must be english or multilingual");
 }
 
 std::size_t resolve_conditionals_cache_slots(const runtime::SessionOptions & options) {
@@ -363,6 +380,7 @@ ChatterboxSession::ChatterboxSession(
       t3_weight_storage_type_(resolve_t3_weight_storage_type(this->options())),
       component_weight_storage_type_(resolve_component_weight_storage_type(this->options())),
       multilingual_t3_version_(resolve_multilingual_t3_version(this->options())),
+      english_via_multilingual_(resolve_english_via_multilingual(this->options())),
       mem_saver_(resolve_mem_saver(this->options())),
       conditionals_cache_(resolve_conditionals_cache_slots(this->options())),
       vc_reference_cache_(resolve_vc_reference_cache_slots(this->options())) {
@@ -414,7 +432,8 @@ void ChatterboxSession::prepare(const runtime::SessionPreparationRequest & reque
     // The component depends on the language only through the T3 it loads,
     // English or multilingual, so a switch between two languages that share
     // it keeps the component and the voices already prepared.
-    const bool multilingual = chatterbox_language_uses_multilingual_t3(session_config.language);
+    const bool multilingual =
+        chatterbox_language_uses_multilingual_t3(session_config.language) || english_via_multilingual_;
     if (!component_ || component_multilingual_ != multilingual) {
         component_.reset();
         component_multilingual_.reset();
@@ -426,7 +445,7 @@ void ChatterboxSession::prepare(const runtime::SessionPreparationRequest & reque
             component_weight_storage_type_,
             multilingual_t3_version_,
             mem_saver_,
-            session_config.language);
+            multilingual);
         component_multilingual_ = multilingual;
         cached_conditionals_.reset();
         conditionals_cache_.clear();

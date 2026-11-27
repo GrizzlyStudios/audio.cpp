@@ -76,6 +76,7 @@ ChatterboxTTSComponent::ChatterboxTTSComponent(
     std::unique_ptr<engine::codecs::s3gen::S3GenRuntime> s3gen,
     ChatterboxPromptPrepConfig prompt_prep_config,
     const engine::core::ExecutionContext & execution_context,
+    bool multilingual,
     bool mem_saver)
     : t3_(
           std::move(t3_weights),
@@ -88,6 +89,7 @@ ChatterboxTTSComponent::ChatterboxTTSComponent(
           prompt_prep_config),
       s3gen_(std::move(s3gen)),
       execution_context_(&execution_context),
+      multilingual_(multilingual),
       mem_saver_(mem_saver) {
     if (!tokenizer_) {
         throw std::runtime_error("ChatterboxTtsComponent requires text tokenizer");
@@ -137,7 +139,7 @@ ChatterboxVoiceCloneOutputs ChatterboxTTSComponent::synthesize_voice_clone_impl(
     ChatterboxVoiceCloneOutputs outputs;
     outputs.normalized_text = normalize_chatterbox_tts_text(text);
     const std::string language = normalize_chatterbox_language_code(config.language);
-    outputs.text_tokens = chatterbox_language_uses_multilingual_t3(language)
+    outputs.text_tokens = multilingual_
         ? encode_chatterbox_multilingual_text(*tokenizer_, outputs.normalized_text, language)
         : encode_chatterbox_english_text(*tokenizer_, outputs.normalized_text);
     outputs.text_tokens.insert(outputs.text_tokens.begin(), chatterbox_english_start_token_id(*tokenizer_));
@@ -251,7 +253,7 @@ ChatterboxVoiceCloneOutputs ChatterboxTTSComponent::synthesize_voice_clone_impl(
     outputs.mel_channels = mel.channels;
     outputs.mel_frames = mel.frames;
     apply_s3_trim_fade(outputs.waveform, 24000);
-    if (chatterbox_language_uses_multilingual_t3(language)) {
+    if (multilingual_) {
         const int64_t speech_token_audio_samples = 24000 / 25;
         const int64_t effective_speech_tokens =
             std::max<int64_t>(1, static_cast<int64_t>(outputs.cleaned_speech_tokens.size()) - 1);

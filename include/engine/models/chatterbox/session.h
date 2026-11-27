@@ -62,10 +62,13 @@ private:
     engine::assets::TensorStorageType t3_weight_storage_type_ = engine::assets::TensorStorageType::Native;
     engine::assets::TensorStorageType component_weight_storage_type_ = engine::assets::TensorStorageType::Native;
     ChatterboxMultilingualT3Version multilingual_t3_version_ = ChatterboxMultilingualT3Version::V2;
+    // chatterbox.english_t3=multilingual: English is read by the multilingual T3 too.
+    bool english_via_multilingual_ = false;
     bool mem_saver_ = false;
     std::unique_ptr<ChatterboxTTSComponent> component_;
     std::unique_ptr<ChatterboxVCComponent> vc_component_;
-    // Whether component_ runs the multilingual T3 (every language but English).
+    // Whether component_ runs the multilingual T3 (every language but English,
+    // and English too under chatterbox.english_t3=multilingual).
     std::optional<bool> component_multilingual_;
     std::optional<ChatterboxVoiceCloneConfig> voice_clone_config_;
     runtime::CacheSlots<

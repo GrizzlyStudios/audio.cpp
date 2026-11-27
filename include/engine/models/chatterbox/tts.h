@@ -93,6 +93,7 @@ public:
         std::unique_ptr<engine::codecs::s3gen::S3GenRuntime> s3gen,
         ChatterboxPromptPrepConfig prompt_prep_config,
         const engine::core::ExecutionContext & execution_context,
+        bool multilingual,
         bool mem_saver = false);
 
     ChatterboxVoiceCloneOutputs synthesize_voice_clone(
@@ -120,6 +121,9 @@ private:
     ChatterboxConditionalsComponent conditionals_;
     std::unique_ptr<engine::codecs::s3gen::S3GenRuntime> s3gen_;
     const engine::core::ExecutionContext * execution_context_ = nullptr;
+    // Whether t3_ is a multilingual T3: decides the text encoding and the trim,
+    // so English read through the multilingual T3 is encoded as it expects.
+    bool multilingual_ = false;
     bool mem_saver_ = false;
 };
 
