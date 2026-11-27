@@ -1,0 +1,234 @@
+# civicrecap-release.yml: the ONLY workflow on the GrizzlyStudios/audio.cpp
+# fork's `civicrecap/zh` branch (copied to .github/workflows/ by
+# civic-recap's infra/audiocpp/prepare-fork.sh, which deletes upstream's own).
+# The source of truth is civic-recap's infra/audiocpp/; edit it there and
+# re-run prepare-fork.sh rather than editing this copy on the fork.
+#
+# It builds the patched `audiocpp_cli` (upstream v0.9.6 + zh-cangjie.patch)
+# the CivicRecap Mac minis narrate with, and publishes it as a GitHub release
+# asset that provision-tools.sh pins by sha256. Nothing on the fleet builds
+# it. The release exists only if all four checks pass:
+#
+#   source   the branch is exactly upstream v0.9.6 + the recorded patch
+#   parity   the patched tokenizer gives the same token ids as upstream
+#            Chatterbox's Python, on the sample lines and on every character
+#            Cangjie5_TC.json lists
+#   smoke    a CPU build reads zh, es and en from the pinned GGUF with the
+#            exact flags NarrateSocialPostExecutor passes
+#   macos    the Metal build the minis run: self-contained, `--help` runs
+#
+# The tag is `civicrecap-v…`, never `v…`, so nothing of upstream's can fire.
+name: civicrecap-release
+
+on:
+  push:
+    tags: ["civicrecap-*"]
+  # A dry run: every check and the macOS tarball as an artifact, no release.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  UPSTREAM_COMMIT: 04a37f2e80ff2dbcdd84cc67848a970bd02a73e0 # 0xShug0/audio.cpp v0.9.6
+  PATCH_SHA256: f7a57e4822af3c9040f713039f693030d0a8b838e6c0afe89c4fae7664f4d141
+  BUILD_VERSION: 0.9.6-zh1
+  ASSET: audio-v0.9.6-zh1-bin-macos-arm64-metal.tar.gz
+  # The model the fleet pins (provision-tools.sh CHATTERBOX_REVISION).
+  GGUF_URL: https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/874fcb41ececda20bcbc0782d6b4ea7f7d069ea8/Chatterbox-GGUF/chatterbox-q8_0.gguf
+  GGUF_SHA256: 45d71d8d248ba831014813bbbbba74c7d786dd9447c02090fe05c44344f69453
+  # Upstream Chatterbox, for parity: its tokenizer and its tokenizer files.
+  CHATTERBOX_PY_COMMIT: ab55923c27757c90cfcc407baa57dc25a7d25217
+  RESEMBLE_HF_REVISION: 5bb1f6ee58e50c3b8d408bc82a6d3740c2db6e18
+  MTL_TOKENIZER_SHA256: 69632f47220a788a52ce2661d096453c5655e9bf25289d89a8d832c46ee07dbf
+  CANGJIE_SHA256: 7073fd9de919443ae88e0bd2449917a65fe54898a4413ed1edcc4b67f28bce8c
+  TOKENIZERS_VERSION: 0.23.3
+  # The one build difference from upstream's own macOS release: only the
+  # family narration uses. Nothing else on the minis calls audiocpp_cli.
+  MODEL_SET: -DAUDIOCPP_MODEL_SET=custom -DAUDIOCPP_MODELS=chatterbox
+
+jobs:
+  source:
+    name: Branch is upstream v0.9.6 + the recorded patch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Patch is the one recorded in civic-recap
+        run: echo "$PATCH_SHA256  civicrecap/zh-cangjie.patch" | sha256sum -c -
+      - name: Upstream + patch (fuzz 0) == this tree
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/upstream" "$UPSTREAM_COMMIT"
+          cd "$RUNNER_TEMP/upstream"
+          patch -p1 --dry-run --fuzz=0 < "$GITHUB_WORKSPACE/civicrecap/zh-cangjie.patch"
+          patch -p1 --fuzz=0 < "$GITHUB_WORKSPACE/civicrecap/zh-cangjie.patch"
+          cd "$GITHUB_WORKSPACE"
+          # Everything but our own additions (civicrecap/, the workflow).
+          diff -r -q -x .git -x civicrecap -x .github "$RUNNER_TEMP/upstream" .
+
+  parity:
+    name: Token parity with upstream Chatterbox (Python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Upstream tokenizer and its files, pinned
+        run: |
+          pip install "tokenizers==$TOKENIZERS_VERSION"
+          git clone --quiet https://github.com/resemble-ai/chatterbox "$RUNNER_TEMP/chatterbox"
+          git -C "$RUNNER_TEMP/chatterbox" checkout --quiet "$CHATTERBOX_PY_COMMIT"
+          mkdir -p "$RUNNER_TEMP/hf"
+          base="https://huggingface.co/ResembleAI/chatterbox/resolve/$RESEMBLE_HF_REVISION"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/hf/grapheme_mtl_merged_expanded_v1.json" "$base/grapheme_mtl_merged_expanded_v1.json"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/hf/Cangjie5_TC.json" "$base/Cangjie5_TC.json"
+          printf '%s  %s\n' \
+            "$MTL_TOKENIZER_SHA256" "$RUNNER_TEMP/hf/grapheme_mtl_merged_expanded_v1.json" \
+            "$CANGJIE_SHA256" "$RUNNER_TEMP/hf/Cangjie5_TC.json" | sha256sum -c -
+      - name: Build the tokenizer on its own
+        run: sh civicrecap/parity/build.sh . "$RUNNER_TEMP/tokenize_main"
+      - name: Compare
+        run: |
+          # The default shell has no pipefail, and a mismatch must not be teed away.
+          set -o pipefail
+          python civicrecap/parity/compare.py \
+            "$RUNNER_TEMP/chatterbox/src/chatterbox/models/tokenizers/tokenizer.py" \
+            "$RUNNER_TEMP/hf/grapheme_mtl_merged_expanded_v1.json" \
+            "$RUNNER_TEMP/hf/Cangjie5_TC.json" \
+            civicrecap/parity/lines.tsv \
+            "$RUNNER_TEMP/tokenize_main" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  smoke:
+    name: CPU build reads zh, es, en from the pinned GGUF
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build (CPU, chatterbox only)
+        run: |
+          # shellcheck disable=SC2086 # $MODEL_SET is two flags, split on purpose
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+            -DENGINE_ENABLE_CUDA=OFF -DENGINE_ENABLE_VULKAN=OFF -DENGINE_ENABLE_METAL=OFF \
+            -DGGML_NATIVE=OFF -DENGINE_ENABLE_NATIVE_CPU=OFF \
+            -DENGINE_ENABLE_OPENMP=OFF -DGGML_OPENMP=OFF \
+            -DAUDIOCPP_DEPLOYMENT_BUILD=ON -DAUDIOCPP_VERSION="$BUILD_VERSION" $MODEL_SET
+          cmake --build build --config Release --parallel "$(nproc)" --target audiocpp_cli
+          build/bin/audiocpp_cli --version
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/model
+          key: chatterbox-gguf-${{ env.GGUF_SHA256 }}
+      - name: Pinned GGUF
+        run: |
+          mkdir -p "$RUNNER_TEMP/model"
+          gguf="$RUNNER_TEMP/model/chatterbox-q8_0.gguf"
+          [ -f "$gguf" ] || curl -fsSL --retry 3 -o "$gguf" "$GGUF_URL"
+          echo "$GGUF_SHA256  $gguf" | sha256sum -c -
+      - name: A reference voice (espeak-ng, as civic-recap's make-fixture.sh)
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq espeak-ng
+          espeak-ng -s 150 -w "$RUNNER_TEMP/voice.wav" \
+            "Good evening. This is a reading of what the city council decided at its meeting on Tuesday night."
+      - name: Read zh, es and en with NarrateSocialPostExecutor's flags
+        run: |
+          mkdir -p reads
+          read_one() {
+            build/bin/audiocpp_cli \
+              --task clon --family chatterbox --model "$RUNNER_TEMP/model" --backend cpu \
+              --threads "$(nproc)" \
+              --language "$1" --text "$2" --voice-ref "$RUNNER_TEMP/voice.wav" \
+              --seed 42 --text-chunk-size 220 --max-tokens 800 \
+              --request-option exaggeration=0.5 --request-option guidance_scale=0.5 \
+              --out "reads/$1.wav"
+            size=$(wc -c < "reads/$1.wav")
+            echo "$1: $size bytes" | tee -a "$GITHUB_STEP_SUMMARY"
+            [ "$size" -gt 4096 ]
+          }
+          read_one zh "以下是莫根希尔联合学区教育委员会于二零二六年十一月十九日，星期四，会议上的情况。我们先从安·索布拉托高中说起。"
+          read_one es "Esto es lo que decidió el concejo municipal el martes por la noche."
+          read_one en "Here is what the city council decided on Tuesday night."
+      - uses: actions/upload-artifact@v4
+        with:
+          name: smoke-reads
+          path: reads/*.wav
+          if-no-files-found: error
+
+  macos:
+    name: macOS arm64 Metal (what the minis run)
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      # Upstream's macos-metal release job (.github/workflows/release.yml at
+      # v0.9.6), flag for flag, plus $MODEL_SET; only the CLI target.
+      - name: Configure
+        run: |
+          # shellcheck disable=SC2086 # $MODEL_SET is two flags, split on purpose
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_RPATH='@loader_path' -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
+            -DENGINE_ENABLE_CUDA=OFF -DENGINE_ENABLE_VULKAN=OFF \
+            -DAUDIOCPP_VERSION="$BUILD_VERSION" \
+            -DGGML_METAL=ON -DCMAKE_OSX_DEPLOYMENT_TARGET=13.3 -DENGINE_ENABLE_OPENMP=OFF -DGGML_OPENMP=OFF \
+            -DAUDIOCPP_DEPLOYMENT_BUILD=ON -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=ON \
+            -DENGINE_ENABLE_LLAMAFILE=ON -DENGINE_ENABLE_CUDA_GRAPHS=ON \
+            $MODEL_SET
+      - name: Build
+        run: cmake --build build --config Release --parallel "$(sysctl -n hw.logicalcpu)" --target audiocpp_cli
+      - name: Self-contained (system libraries and frameworks only)
+        run: |
+          otool -L build/bin/audiocpp_cli
+          foreign=$(otool -L build/bin/audiocpp_cli | tail -n +2 | awk '{print $1}' \
+            | grep -v -e '^/usr/lib/' -e '^/System/' || true)
+          if [ -n "$foreign" ]; then
+            echo "audiocpp_cli links outside the system: $foreign" >&2
+            exit 1
+          fi
+      - name: Runs
+        run: |
+          build/bin/audiocpp_cli --version
+          build/bin/audiocpp_cli --help > /dev/null
+      # The layout provision-tools.sh extracts: ./audiocpp_cli ./model_specs ./LICENSE
+      - name: Package
+        run: |
+          mkdir stage
+          cp build/bin/audiocpp_cli stage/
+          cp -R model_specs stage/model_specs
+          cp LICENSE stage/
+          tar -czf "$ASSET" -C stage ./audiocpp_cli ./model_specs ./LICENSE
+          shasum -a 256 "$ASSET" > SHA256SUMS
+          cat SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64-metal
+          path: |
+            ${{ env.ASSET }}
+            SHA256SUMS
+          if-no-files-found: error
+
+  release:
+    name: Publish the release
+    needs: [source, parity, smoke, macos]
+    if: startsWith(github.ref, 'refs/tags/civicrecap-')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-arm64-metal
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha256sum -c SHA256SUMS
+          tag="${GITHUB_REF#refs/tags/}"
+          gh release create "$tag" "$ASSET" SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --title "$tag" \
+            --notes "audio.cpp v0.9.6 (${UPSTREAM_COMMIT}) + zh-cangjie.patch (sha256 ${PATCH_SHA256}), Chatterbox only, macOS arm64 Metal. Built for CivicRecap narration; see civic-recap infra/audiocpp/README.md."
+          url="https://github.com/$GITHUB_REPOSITORY/releases/download/$tag/$ASSET"
+          {
+            echo "### Pin for provision-tools.sh"
+            echo
+            echo "- URL: \`$url\`"
+            echo "- sha256: \`$(cut -d' ' -f1 SHA256SUMS)\`"
+          } >> "$GITHUB_STEP_SUMMARY"

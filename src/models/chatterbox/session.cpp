@@ -170,10 +170,11 @@ std::unique_ptr<ChatterboxTTSComponent> make_chatterbox_component_for_language(
         execution_context,
         t3_weight_storage_type,
         false);
-    auto tokenizer = load_chatterbox_english_tokenizer(
-        use_multilingual
-            ? assets.resources.require_file("multilingual_tokenizer")
-            : assets.resources.require_file("english_tokenizer"));
+    auto tokenizer = use_multilingual
+        ? load_chatterbox_english_tokenizer(
+              assets.resources.require_file("multilingual_tokenizer"),
+              assets.resources.require_file("cangjie_mapping"))
+        : load_chatterbox_english_tokenizer(assets.resources.require_file("english_tokenizer"));
     auto voice_encoder = VoiceEncoderComponent::load_from_source(*assets.voice_encoder_weights, options.backend);
     auto s3_tokenizer = S3TokenizerComponent::load_from_source(
         *assets.s3gen_weights,
